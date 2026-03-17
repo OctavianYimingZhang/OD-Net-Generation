@@ -3,6 +3,7 @@ dataset:
   sample_size: 100
   knn_k: 8
   ordering: "xy"
+  neighbor_metric: "haversine"
   split_mode: "county"
   heldout_counties: ["061"]
   val_counties: ["047"]

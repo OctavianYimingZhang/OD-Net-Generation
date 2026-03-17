@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 
-class ODAutoEncoder(nn.Module):
+class ODAutoencoder(nn.Module):
     """输入 `1x100x100`，latent 为 `16x25x25`。"""
 
     def __init__(self, latent_channels: int = 16) -> None:
@@ -35,7 +35,7 @@ class ODAutoEncoder(nn.Module):
             return x.unsqueeze(1)
         if x.ndim == 4:
             return x
-        raise ValueError(f"ODAutoEncoder 仅支持 [B,N,N] 或 [B,1,N,N]，收到 {tuple(x.shape)}")
+        raise ValueError(f"ODAutoencoder 仅支持 [B,N,N] 或 [B,1,N,N]，收到 {tuple(x.shape)}")
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.encoder(self._ensure_4d(x))
@@ -43,15 +43,7 @@ class ODAutoEncoder(nn.Module):
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         return self.decoder(latent)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        latent = self.encode(x)
-        recon = self.decode(latent)
-        return recon, latent
-
-
-class ODAutoencoder(ODAutoEncoder):
-    """向新训练代码暴露字典风格接口。"""
-
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        reconstruction, latent = super().forward(x)
+        latent = self.encode(x)
+        reconstruction = self.decode(latent)
         return {"reconstruction": reconstruction, "latent": latent}

@@ -17,6 +17,7 @@ class DatasetConfig:
     sample_size: int = 100
     knn_k: int = 8
     ordering: str = "xy"
+    neighbor_metric: str = "haversine"
     split_mode: str = "county"
     built_root: str = "od_zero_shot/artifacts/datasets"
     heldout_counties: list[str] = field(default_factory=lambda: ["061"])

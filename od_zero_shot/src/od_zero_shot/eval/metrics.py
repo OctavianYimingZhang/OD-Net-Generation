@@ -1,8 +1,10 @@
-"""指标计算。"""
+"""指标计算与聚合。"""
 
 from __future__ import annotations
 
 import math
+from statistics import mean, median, pstdev
+from typing import Any
 
 import numpy as np
 from sklearn.metrics import average_precision_score, f1_score, mean_absolute_error, mean_squared_error, roc_auc_score
@@ -27,7 +29,13 @@ def binary_edge_metrics(y_true_log: np.ndarray, y_pred_log: np.ndarray, threshol
     }
 
 
-def grouped_regression_metrics(y_true_log: np.ndarray, y_pred_log: np.ndarray, mask_diag: np.ndarray, mask_pos_off: np.ndarray, mask_zero_off: np.ndarray) -> dict[str, float]:
+def grouped_regression_metrics(
+    y_true_log: np.ndarray,
+    y_pred_log: np.ndarray,
+    mask_diag: np.ndarray,
+    mask_pos_off: np.ndarray,
+    mask_zero_off: np.ndarray,
+) -> dict[str, float]:
     metrics = {}
     groups = {
         "all_pairs": np.ones_like(mask_diag, dtype=bool),
@@ -86,7 +94,7 @@ def distance_decay_metrics(
     y_true_log: np.ndarray,
     y_pred_log: np.ndarray,
     distance_matrix_km: np.ndarray,
-    bins: int | list[float],
+    bins: list[float],
 ) -> dict[str, float | dict[str, list[float]]]:
     valid_mask = np.ones_like(distance_matrix_km, dtype=bool)
     np.fill_diagonal(valid_mask, False)
@@ -95,18 +103,12 @@ def distance_decay_metrics(
     pred_flow = np.maximum(np.expm1(y_pred_log), 0.0)[valid_mask]
     if distances.size == 0:
         return {"distance_bin_curve_error": float("nan"), "distance_decay_curve": {"true_curve": [], "pred_curve": []}}
-    if isinstance(bins, int):
-        edges = np.linspace(float(distances.min()), float(distances.max()), int(bins) + 1)
-    else:
-        edges = np.asarray(bins, dtype=np.float64)
-        if edges.ndim != 1 or edges.size < 2:
-            raise ValueError("distance_bins 必须是长度至少为 2 的一维数组。")
+    edges = np.asarray(bins, dtype=np.float64)
     errors = []
     true_curve: list[float] = []
     pred_curve: list[float] = []
-    num_bins = int(edges.size - 1)
-    for idx in range(num_bins):
-        mask = (distances >= edges[idx]) & (distances <= edges[idx + 1] if idx == num_bins - 1 else distances < edges[idx + 1])
+    for idx in range(len(edges) - 1):
+        mask = (distances >= edges[idx]) & (distances <= edges[idx + 1] if idx == len(edges) - 2 else distances < edges[idx + 1])
         if np.sum(mask) == 0:
             true_curve.append(0.0)
             pred_curve.append(0.0)
@@ -122,9 +124,9 @@ def distance_decay_metrics(
     }
 
 
-def compute_all_metrics(sample: dict, pred_log: np.ndarray, threshold: float, top_k: int, distance_bins: int | list[float]) -> dict[str, float | dict[str, list[float]]]:
+def compute_all_metrics(sample: dict[str, Any], pred_log: np.ndarray, threshold: float, top_k: int, distance_bins: list[float]) -> dict[str, Any]:
     y_true = sample["y_od"]
-    metrics = {}
+    metrics: dict[str, Any] = {}
     metrics.update(binary_edge_metrics(y_true, pred_log, threshold))
     metrics.update(grouped_regression_metrics(y_true, pred_log, sample["mask_diag"], sample["mask_pos_off"], sample["mask_zero_off"]))
     metrics.update(flow_conservation_metrics(y_true, pred_log))
@@ -132,3 +134,28 @@ def compute_all_metrics(sample: dict, pred_log: np.ndarray, threshold: float, to
     metrics.update(degree_distribution_error(y_true, pred_log, threshold))
     metrics.update(distance_decay_metrics(y_true, pred_log, sample["distance_matrix"], bins=distance_bins))
     return metrics
+
+
+def aggregate_metrics(per_sample_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    """对数值指标做跨样本聚合。"""
+
+    numeric_keys = sorted(
+        {
+            key
+            for row in per_sample_metrics
+            for key, value in row.items()
+            if isinstance(value, (int, float)) and key != "sample_id"
+        }
+    )
+    aggregate: dict[str, Any] = {}
+    for key in numeric_keys:
+        values = [float(row[key]) for row in per_sample_metrics if isinstance(row.get(key), (int, float)) and not math.isnan(float(row[key]))]
+        if not values:
+            aggregate[key] = {"mean": float("nan"), "std": float("nan"), "median": float("nan")}
+            continue
+        aggregate[key] = {
+            "mean": float(mean(values)),
+            "std": float(pstdev(values)) if len(values) > 1 else 0.0,
+            "median": float(median(values)),
+        }
+    return aggregate

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from od_zero_shot.models.autoencoder import ODAutoEncoder
+from od_zero_shot.models.autoencoder import ODAutoencoder
 from od_zero_shot.models.baselines import PairMLP, build_pair_features_torch, fit_gravity_from_sample_dicts
 from od_zero_shot.models.diffusion import ConditionalLatentDiffusion
 from od_zero_shot.models.graphgps import GraphGPSRegressor
@@ -36,7 +36,7 @@ def _epochs(train_cfg, stage: str) -> int:
 
 def train_gravity_stage(dataset_cfg, train_cfg, split: str, manifest_path: str | None, fixture_name: str | None, checkpoint_dir: str | Path):
     checkpoint_dir = ensure_dir(checkpoint_dir)
-    samples = load_numpy_samples_for_gravity(manifest_path=manifest_path, split=split, fixture_name=fixture_name)
+    samples = load_numpy_samples_for_gravity(dataset_cfg, None, manifest_path=manifest_path, split=split, fixture_name=fixture_name)
     model = fit_gravity_from_sample_dicts(samples)
     model_path = checkpoint_dir / "gravity_model.json"
     model.save(model_path)
@@ -46,8 +46,8 @@ def train_gravity_stage(dataset_cfg, train_cfg, split: str, manifest_path: str |
 def train_pair_mlp_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest_path: str | None, fixture_name: str | None, checkpoint_dir: str | Path):
     torch = _require_torch()
     device = choose_device(train_cfg.device)
-    prepare_run(train_cfg.seed, checkpoint_dir)
-    dataloader = build_dataloader(manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
+    prepare_run(train_cfg.seed, checkpoint_dir, train_cfg.device)
+    dataloader = build_dataloader(dataset_cfg, model_cfg, manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
     model = PairMLP(hidden_dim=model_cfg.hidden_dim, dropout=model_cfg.dropout).to(device)
     optimizer = create_optimizer(model, lr=train_cfg.lr_pair_mlp, weight_decay=train_cfg.weight_decay, name=train_cfg.optimizer)
     history = []
@@ -70,8 +70,8 @@ def train_pair_mlp_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest
 
 def train_regressor_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest_path: str | None, fixture_name: str | None, checkpoint_dir: str | Path):
     device = choose_device(train_cfg.device)
-    prepare_run(train_cfg.seed, checkpoint_dir)
-    dataloader = build_dataloader(manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
+    prepare_run(train_cfg.seed, checkpoint_dir, train_cfg.device)
+    dataloader = build_dataloader(dataset_cfg, model_cfg, manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
     model = GraphGPSRegressor(hidden_dim=model_cfg.hidden_dim, heads=model_cfg.heads, num_layers=model_cfg.gps_layers, pair_dim=model_cfg.pair_dim, dropout=model_cfg.dropout).to(device)
     optimizer = create_optimizer(model, lr=train_cfg.lr_regressor, weight_decay=train_cfg.weight_decay, name=train_cfg.optimizer)
     history = []
@@ -94,9 +94,9 @@ def train_regressor_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifes
 
 def train_ae_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest_path: str | None, fixture_name: str | None, checkpoint_dir: str | Path):
     device = choose_device(train_cfg.device)
-    prepare_run(train_cfg.seed, checkpoint_dir)
-    dataloader = build_dataloader(manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
-    model = ODAutoEncoder(latent_channels=model_cfg.latent_channels).to(device)
+    prepare_run(train_cfg.seed, checkpoint_dir, train_cfg.device)
+    dataloader = build_dataloader(dataset_cfg, model_cfg, manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
+    model = ODAutoencoder(latent_channels=model_cfg.latent_channels).to(device)
     optimizer = create_optimizer(model, lr=train_cfg.lr_ae, weight_decay=train_cfg.weight_decay, name=train_cfg.optimizer)
     history = []
     for epoch in range(_epochs(train_cfg, "ae")):
@@ -107,10 +107,7 @@ def train_ae_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest_path:
             if batch["y_od"].shape[-1] != 100:
                 raise ValueError("OD autoencoder 固定要求输入为 100x100。")
             output = model(batch["y_od"])
-            if isinstance(output, tuple):
-                reconstruction = output[0]
-            else:
-                reconstruction = output["reconstruction"]
+            reconstruction = output["reconstruction"]
             loss = masked_three_way_mse(
                 pred=reconstruction.squeeze(1),
                 target=batch["y_od"],
@@ -131,11 +128,11 @@ def train_ae_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest_path:
 def train_diffusion_stage(dataset_cfg, model_cfg, train_cfg, split: str, manifest_path: str | None, fixture_name: str | None, checkpoint_dir: str | Path, conditional: bool, regressor_checkpoint: str | None, ae_checkpoint: str | None):
     torch = _require_torch()
     device = choose_device(train_cfg.device)
-    prepare_run(train_cfg.seed, checkpoint_dir)
-    dataloader = build_dataloader(manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
+    prepare_run(train_cfg.seed, checkpoint_dir, train_cfg.device)
+    dataloader = build_dataloader(dataset_cfg, model_cfg, manifest_path=manifest_path, split=split, batch_size=dataset_cfg.batch_size, fixture_name=fixture_name)
     if ae_checkpoint is None:
         raise ValueError("训练 diffusion 时必须提供 autoencoder checkpoint。")
-    autoencoder = ODAutoEncoder(latent_channels=model_cfg.latent_channels).to(device)
+    autoencoder = ODAutoencoder(latent_channels=model_cfg.latent_channels).to(device)
     load_torch_checkpoint(ae_checkpoint, autoencoder)
     autoencoder.eval()
     for parameter in autoencoder.parameters():

@@ -18,8 +18,7 @@ dependencies = [
   "matplotlib>=3.8",
   "PyYAML>=6.0",
   "scikit-learn>=1.5",
-  "torch>=2.8",
-  "torch-geometric>=2.6"
+  "torch>=2.8"
 ]
 
 [project.optional-dependencies]
@@ -32,4 +31,3 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

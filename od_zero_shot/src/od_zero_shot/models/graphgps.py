@@ -115,28 +115,26 @@ class GraphGPSRegressor(nn.Module):
 
     def forward(self, sample: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if sample["x_node"].dim() == 3:
-            outputs = []
-            conds = []
+            predictions = []
+            conditions = []
             node_reprs = []
             for idx in range(sample["x_node"].shape[0]):
                 result = self.forward({key: value[idx] for key, value in sample.items()})
-                outputs.append(result["pred"])
-                conds.append(result["pair_condition"])
+                predictions.append(result["y_pred"])
+                conditions.append(result["pair_condition_map"])
                 node_reprs.append(result["node_repr"])
-            stacked_pred = torch.stack(outputs, dim=0)
-            stacked_cond = torch.stack(conds, dim=0)
+            stacked_pred = torch.stack(predictions, dim=0)
+            stacked_cond = torch.stack(conditions, dim=0)
             return {
                 "node_repr": torch.stack(node_reprs, dim=0),
-                "pair_condition": stacked_cond,
-                "pred": stacked_pred,
                 "pair_condition_map": stacked_cond,
                 "y_pred": stacked_pred,
             }
-        struct_feature = sample["struct_feat"] if "struct_feat" in sample else sample["se_feature"]
+        struct_feature = sample["se_feature"]
         node_features = torch.cat([sample["x_node"], struct_feature, sample["lap_pe"]], dim=-1)
         x = self.node_encoder(node_features)
         edge_attr = self.edge_encoder(sample["edge_attr"])
         for layer in self.layers:
             x = layer(x, sample["edge_index"], edge_attr)
         cond_map, pred = self.pair_head(x, sample["pair_geo"])
-        return {"node_repr": x, "pair_condition": cond_map, "pred": pred, "pair_condition_map": cond_map, "y_pred": pred}
+        return {"node_repr": x, "pair_condition_map": cond_map, "y_pred": pred}

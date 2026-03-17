@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from od_zero_shot.data.fixtures import load_fixture
-from od_zero_shot.data.raw import load_raw_pickles, validate_raw_data
+from od_zero_shot.data.raw import load_raw_pickles, sanitize_raw_data, validate_raw_data
 from od_zero_shot.data.sample_builder import build_and_save_split_samples, build_single_fixture_sample, save_sample
 from od_zero_shot.eval.inference import evaluate_model
 from od_zero_shot.train.runner import train_ae_stage, train_diffusion_stage, train_gravity_stage, train_pair_mlp_stage, train_regressor_stage
@@ -52,7 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser("evaluate_infer", help="执行推理、评估与可视化")
     add_common(evaluate)
-    evaluate.add_argument("--model-kind", required=True, choices=["gravity", "pair_mlp", "regressor", "diffusion"], help="要评估的模型类型")
+    evaluate.add_argument(
+        "--model-kind",
+        required=True,
+        choices=["gravity", "pair_mlp", "regressor", "unconditional_diffusion", "conditional_diffusion", "diffusion"],
+        help="要评估的模型类型",
+    )
     evaluate.add_argument("--checkpoint", required=True, help="目标模型 checkpoint 路径")
     evaluate.add_argument("--regressor-checkpoint", default=None, help="diffusion 评估时所需的 regressor checkpoint")
     evaluate.add_argument("--ae-checkpoint", default=None, help="diffusion 评估时所需的 autoencoder checkpoint")
@@ -70,7 +75,9 @@ def handle_check_data(args) -> None:
     if args.fixture is not None:
         print(load_fixture(args.fixture).summary())
         return
-    print(validate_raw_data(load_raw_pickles(config.dataset.raw_root)))
+    raw_data = load_raw_pickles(config.dataset.raw_root)
+    _, sanitize_report = sanitize_raw_data(raw_data)
+    print({"raw_summary": validate_raw_data(raw_data), "sanitize_report": sanitize_report})
 
 
 def handle_build_samples(args) -> None:
@@ -95,6 +102,10 @@ def handle_build_samples(args) -> None:
             num_train_samples=config.dataset.num_train_samples,
             num_val_samples=config.dataset.num_val_samples,
             num_test_samples=config.dataset.num_test_samples,
+            ordering=config.dataset.ordering,
+            lap_pe_dim=config.model.lap_pe_dim,
+            rw_steps=config.model.rw_steps,
+            split_mode=config.dataset.split_mode,
         )
         print(manifest)
         return
@@ -109,6 +120,10 @@ def handle_build_samples(args) -> None:
         num_train_samples=config.dataset.num_train_samples,
         num_val_samples=config.dataset.num_val_samples,
         num_test_samples=config.dataset.num_test_samples,
+        ordering=config.dataset.ordering,
+        lap_pe_dim=config.model.lap_pe_dim,
+        rw_steps=config.model.rw_steps,
+        split_mode=config.dataset.split_mode,
     )
     print(manifest)
 

@@ -1,4 +1,4 @@
-"""模型形状 smoke 测试。"""
+"""canonical pipeline 模型 smoke 测试。"""
 
 from __future__ import annotations
 
@@ -20,46 +20,50 @@ else:
     TORCH_IMPORT_ERROR = None
 
 if torch is not None:
-    from od_zero_shot.data.samples import build_fixture_samples
-    from od_zero_shot.models.autoencoder import ODAutoEncoder
-    from od_zero_shot.models.diffusion import GaussianDiffusion, TinyLatentUNet
+    from od_zero_shot.data.dataset import sample_to_tensor_dict
+    from od_zero_shot.data.fixtures import generate_synthetic_toy100
+    from od_zero_shot.data.sample_builder import build_single_fixture_sample
+    from od_zero_shot.models.autoencoder import ODAutoencoder
+    from od_zero_shot.models.diffusion import ConditionalLatentDiffusion
     from od_zero_shot.models.graphgps import GraphGPSRegressor
-    from od_zero_shot.train.datasets import to_torch_sample
-    from od_zero_shot.utils.config import ProjectConfig
 
 
 @unittest.skipIf(torch is None, f"torch 不可用: {TORCH_IMPORT_ERROR}")
-class ModelShapeTest(unittest.TestCase):
+class CanonicalModelShapeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.config = ProjectConfig()
-        cls.sample = build_fixture_samples(PROJECT_ROOT, cls.config)["synthetic_toy100"]
+        fixture = build_single_fixture_sample(
+            generate_synthetic_toy100(),
+            split="fixture",
+            knn_k=8,
+            ordering="xy",
+            lap_pe_dim=8,
+            rw_steps=2,
+            neighbor_metric="haversine",
+        )
+        cls.sample = sample_to_tensor_dict(fixture)
+        cls.batch = {key: value.unsqueeze(0) if torch.is_tensor(value) else value for key, value in cls.sample.items()}
 
     def test_graphgps_forward_shape(self) -> None:
-        model = GraphGPSRegressor(num_layers=2)
-        output = model(to_torch_sample(self.sample))
-        self.assertEqual(tuple(output["pred"].shape), (100, 100))
-        self.assertEqual(tuple(output["pair_condition"].shape), (self.config.model.pair_dim, 100, 100))
+        model = GraphGPSRegressor()
+        output = model(self.batch)
+        self.assertEqual(tuple(output["y_pred"].shape), (1, 100, 100))
+        self.assertEqual(tuple(output["pair_condition_map"].shape), (1, 64, 100, 100))
 
     def test_autoencoder_shape(self) -> None:
-        model = ODAutoEncoder(latent_channels=16)
-        matrix = torch.as_tensor(self.sample["y_od"], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        recon, latent = model(matrix)
-        self.assertEqual(tuple(recon.shape), (1, 1, 100, 100))
-        self.assertEqual(tuple(latent.shape), (1, 16, 25, 25))
+        model = ODAutoencoder(latent_channels=16)
+        output = model(self.sample["y_od"].unsqueeze(0))
+        self.assertEqual(tuple(output["reconstruction"].shape), (1, 1, 100, 100))
+        self.assertEqual(tuple(output["latent"].shape), (1, 16, 25, 25))
 
     def test_diffusion_shape(self) -> None:
-        autoencoder = ODAutoEncoder(latent_channels=16)
-        matrix = torch.as_tensor(self.sample["y_od"], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        _, latent = autoencoder(matrix)
-        cond = torch.zeros((1, 64, 25, 25), dtype=torch.float32)
-        denoiser = TinyLatentUNet(latent_channels=16, cond_channels=64, base_channels=32)
-        diffusion = GaussianDiffusion(timesteps=10)
-        noisy, noise = diffusion.q_sample(latent, torch.tensor([3], dtype=torch.long))
-        pred_noise = denoiser(noisy, torch.tensor([3], dtype=torch.long), cond)
-        self.assertEqual(tuple(noisy.shape), tuple(latent.shape))
-        self.assertEqual(tuple(noise.shape), tuple(latent.shape))
-        self.assertEqual(tuple(pred_noise.shape), tuple(latent.shape))
+        regressor = GraphGPSRegressor()
+        pair_condition = regressor(self.batch)["pair_condition_map"]
+        autoencoder = ODAutoencoder(latent_channels=16)
+        latent = autoencoder.encode(self.batch["y_od"])
+        diffusion = ConditionalLatentDiffusion(latent_channels=16, pair_dim=64, diffusion_steps=10, conditional=True)
+        output = diffusion.training_loss(clean_latent=latent, pair_condition=pair_condition)
+        self.assertEqual(tuple(output["pred_noise"].shape), tuple(latent.shape))
 
 
 if __name__ == "__main__":

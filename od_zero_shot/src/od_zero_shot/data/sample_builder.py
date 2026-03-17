@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
-from od_zero_shot.data.raw import RawMobilityData
-from od_zero_shot.utils.common import ensure_dir, save_json
+from od_zero_shot.data.raw import RawMobilityData, sanitize_raw_data
+from od_zero_shot.utils.common import ensure_dir, load_json, save_json
 from od_zero_shot.utils.geometry import (
     build_knn_graph,
     coordinate_delta_matrices,
@@ -23,6 +24,27 @@ from od_zero_shot.utils.geometry import (
     rw_diagonal_feature,
     stable_sample,
 )
+
+
+def _order_indices(coords: np.ndarray, ordering: str) -> np.ndarray:
+    if ordering == "xy":
+        return order_indices_xy(coords)
+    if ordering == "morton":
+        coords_norm = normalize_coords(coords)
+        grid = np.clip((coords_norm * 1023).astype(np.int64), 0, 1023)
+
+        def part1by1(value: np.ndarray) -> np.ndarray:
+            out = value.copy()
+            out = (out | (out << 16)) & 0x0000FFFF0000FFFF
+            out = (out | (out << 8)) & 0x00FF00FF00FF00FF
+            out = (out | (out << 4)) & 0x0F0F0F0F0F0F0F0F
+            out = (out | (out << 2)) & 0x3333333333333333
+            out = (out | (out << 1)) & 0x5555555555555555
+            return out
+
+        morton = part1by1(grid[:, 0]) | (part1by1(grid[:, 1]) << 1)
+        return np.argsort(morton, kind="stable")
+    raise ValueError(f"不支持的 ordering: {ordering}")
 
 
 @dataclass(slots=True)
@@ -50,6 +72,7 @@ class GraphSample:
     mask_zero_off: np.ndarray
     row_sum: np.ndarray
     col_sum: np.ndarray
+    metadata: dict[str, object]
 
     def to_numpy_dict(self) -> dict[str, np.ndarray]:
         return {
@@ -76,6 +99,7 @@ class GraphSample:
             "mask_zero_off": self.mask_zero_off.astype(np.int8),
             "row_sum": self.row_sum.astype(np.float32),
             "col_sum": self.col_sum.astype(np.float32),
+            "metadata_json": np.asarray(json.dumps(self.metadata, ensure_ascii=False), dtype=object),
         }
 
 
@@ -88,10 +112,34 @@ def _flow_matrix(raw_data: RawMobilityData, node_ids: list[str]) -> np.ndarray:
     return flow
 
 
-def _make_sample(raw_data: RawMobilityData, node_ids: list[str], sample_id: str, split: str, knn_k: int) -> GraphSample:
+def _candidate_distances(raw_data: RawMobilityData, seed_id: str, candidate_ids: list[str], neighbor_metric: str) -> np.ndarray:
+    coords = np.asarray([raw_data.centroids[node_id] for node_id in candidate_ids], dtype=np.float32)
+    if neighbor_metric == "haversine":
+        seed_coord = np.asarray(raw_data.centroids[seed_id], dtype=np.float32)[None, :]
+        all_coords = np.concatenate([seed_coord, coords], axis=0)
+        dist = haversine_matrix(all_coords)[0, 1:]
+        return dist.astype(np.float32)
+    if neighbor_metric == "euclidean":
+        seed = np.asarray(raw_data.centroids[seed_id], dtype=np.float32)[None, :]
+        return np.sqrt(((coords - seed) ** 2).sum(axis=1)).astype(np.float32)
+    raise ValueError(f"不支持的 neighbor_metric: {neighbor_metric}")
+
+
+def _make_sample(
+    raw_data: RawMobilityData,
+    node_ids: list[str],
+    sample_id: str,
+    split: str,
+    knn_k: int,
+    ordering: str,
+    lap_pe_dim: int,
+    rw_steps: int,
+    seed_id: str,
+    neighbor_metric: str,
+) -> GraphSample:
     coords = np.asarray([raw_data.centroids[node_id] for node_id in node_ids], dtype=np.float32)
     population = np.asarray([raw_data.populations[node_id] for node_id in node_ids], dtype=np.float32)
-    order = order_indices_xy(coords)
+    order = _order_indices(coords, ordering)
     node_ids = [node_ids[idx] for idx in order.tolist()]
     coords = coords[order]
     population = population[order]
@@ -110,8 +158,11 @@ def _make_sample(raw_data: RawMobilityData, node_ids: list[str], sample_id: str,
         ],
         axis=1,
     ).astype(np.float32)
-    lap_pe = laplacian_positional_encoding(adjacency_geo, dim=8).astype(np.float32)
-    se_feature = np.concatenate([degree_feature(adjacency_geo), rw_diagonal_feature(adjacency_geo, steps=2)], axis=1).astype(np.float32)
+    lap_pe = laplacian_positional_encoding(adjacency_geo, dim=lap_pe_dim).astype(np.float32)
+    se_feature = np.concatenate(
+        [degree_feature(adjacency_geo), rw_diagonal_feature(adjacency_geo, steps=rw_steps)],
+        axis=1,
+    ).astype(np.float32)
     flow = _flow_matrix(raw_data, node_ids)
     y_od = log1p_safe(flow).astype(np.float32)
     mask_diag = np.eye(len(node_ids), dtype=bool)
@@ -126,13 +177,24 @@ def _make_sample(raw_data: RawMobilityData, node_ids: list[str], sample_id: str,
         [
             np.repeat(log_pop[:, None], len(node_ids), axis=1),
             np.repeat(log_pop[None, :], len(node_ids), axis=0),
-            log1p_safe(distance_matrix),
-            dx_matrix,
-            dy_matrix,
-            self_loop,
+            pair_geo[..., 0],
+            pair_geo[..., 1],
+            pair_geo[..., 2],
+            pair_geo[..., 3],
         ],
         axis=-1,
     ).astype(np.float32)
+    metadata = {
+        "seed_id": seed_id,
+        "split": split,
+        "ordering": ordering,
+        "knn_k": knn_k,
+        "lap_pe_dim": lap_pe_dim,
+        "rw_steps": rw_steps,
+        "sample_size": len(node_ids),
+        "neighbor_metric": neighbor_metric,
+        "counties": sorted(set(counties)),
+    }
     return GraphSample(
         sample_id=sample_id,
         split=split,
@@ -157,11 +219,31 @@ def _make_sample(raw_data: RawMobilityData, node_ids: list[str], sample_id: str,
         mask_zero_off=mask_zero_off,
         row_sum=row_sum,
         col_sum=col_sum,
+        metadata=metadata,
     )
 
 
-def build_single_fixture_sample(raw_data: RawMobilityData, split: str, knn_k: int) -> GraphSample:
-    return _make_sample(raw_data, raw_data.node_ids, sample_id=f"{split}_fixture", split=split, knn_k=knn_k)
+def build_single_fixture_sample(
+    raw_data: RawMobilityData,
+    split: str,
+    knn_k: int,
+    ordering: str = "xy",
+    lap_pe_dim: int = 8,
+    rw_steps: int = 2,
+    neighbor_metric: str = "haversine",
+) -> GraphSample:
+    return _make_sample(
+        raw_data,
+        raw_data.node_ids,
+        sample_id=f"{split}_fixture",
+        split=split,
+        knn_k=knn_k,
+        ordering=ordering,
+        lap_pe_dim=lap_pe_dim,
+        rw_steps=rw_steps,
+        seed_id="fixture",
+        neighbor_metric=neighbor_metric,
+    )
 
 
 def split_seed_ids_by_county(raw_data: RawMobilityData, heldout_counties: Iterable[str], val_counties: Iterable[str]) -> dict[str, list[str]]:
@@ -187,16 +269,29 @@ def build_sample_from_seed(
     split: str,
     sample_id: str,
     candidate_node_ids: list[str] | None = None,
+    ordering: str = "xy",
+    lap_pe_dim: int = 8,
+    rw_steps: int = 2,
+    neighbor_metric: str = "haversine",
 ) -> GraphSample:
     candidate_ids = raw_data.node_ids if candidate_node_ids is None else list(candidate_node_ids)
     if seed_id not in candidate_ids:
         raise ValueError(f"seed 节点 {seed_id} 不在 split={split} 的候选池中。")
-    coords = np.asarray([raw_data.centroids[node_id] for node_id in candidate_ids], dtype=np.float32)
-    seed = np.asarray(raw_data.centroids[seed_id], dtype=np.float32)[None, :]
-    distances = np.sqrt(((coords - seed) ** 2).sum(axis=1))
+    distances = _candidate_distances(raw_data, seed_id=seed_id, candidate_ids=candidate_ids, neighbor_metric=neighbor_metric)
     order = np.argsort(distances)[: min(sample_size, len(candidate_ids))]
     node_ids = [candidate_ids[idx] for idx in order.tolist()]
-    return _make_sample(raw_data, node_ids, sample_id=sample_id, split=split, knn_k=knn_k)
+    return _make_sample(
+        raw_data,
+        node_ids,
+        sample_id=sample_id,
+        split=split,
+        knn_k=knn_k,
+        ordering=ordering,
+        lap_pe_dim=lap_pe_dim,
+        rw_steps=rw_steps,
+        seed_id=seed_id,
+        neighbor_metric=neighbor_metric,
+    )
 
 
 def save_sample(sample: GraphSample, path: str | Path) -> None:
@@ -207,6 +302,9 @@ def save_sample(sample: GraphSample, path: str | Path) -> None:
 
 def load_sample(path: str | Path) -> GraphSample:
     with np.load(Path(path), allow_pickle=True) as data:
+        metadata = {}
+        if "metadata_json" in data:
+            metadata = json.loads(str(data["metadata_json"].item()))
         return GraphSample(
             sample_id=str(data["sample_id"]),
             split=str(data["split"]),
@@ -231,36 +329,77 @@ def load_sample(path: str | Path) -> GraphSample:
             mask_zero_off=data["mask_zero_off"].astype(bool),
             row_sum=data["row_sum"].astype(np.float32),
             col_sum=data["col_sum"].astype(np.float32),
+            metadata=metadata,
         )
 
 
 def load_manifest_paths(manifest_path: str | Path, split: str) -> list[Path]:
-    from od_zero_shot.utils.common import load_json
-
     manifest = load_json(manifest_path)
     return [Path(path) for path in manifest.get(split, [])]
 
 
-def build_and_save_split_samples(raw_data: RawMobilityData, built_root: str | Path, sample_size: int, knn_k: int, heldout_counties: Iterable[str], val_counties: Iterable[str], num_train_samples: int, num_val_samples: int, num_test_samples: int) -> dict[str, list[str]]:
+def build_and_save_split_samples(
+    raw_data: RawMobilityData,
+    built_root: str | Path,
+    sample_size: int,
+    knn_k: int,
+    heldout_counties: Iterable[str],
+    val_counties: Iterable[str],
+    num_train_samples: int,
+    num_val_samples: int,
+    num_test_samples: int,
+    ordering: str = "xy",
+    lap_pe_dim: int = 8,
+    rw_steps: int = 2,
+    split_mode: str = "county",
+    neighbor_metric: str = "haversine",
+) -> dict[str, list[str]]:
+    if split_mode != "county":
+        raise ValueError(f"当前仅实现 split_mode='county'，收到 {split_mode}")
+    sanitized_raw, sanitize_report = sanitize_raw_data(raw_data)
     built_root = ensure_dir(built_root)
-    split_seeds = split_seed_ids_by_county(raw_data, heldout_counties=heldout_counties, val_counties=val_counties)
+    split_seeds = split_seed_ids_by_county(sanitized_raw, heldout_counties=heldout_counties, val_counties=val_counties)
     quotas = {"train": num_train_samples, "val": num_val_samples, "test": num_test_samples}
     manifest: dict[str, list[str]] = {"train": [], "val": [], "test": []}
+    split_counties = {
+        "train": sorted({county_code_from_fips(node_id) for node_id in split_seeds["train"]}),
+        "val": sorted({county_code_from_fips(node_id) for node_id in split_seeds["val"]}),
+        "test": sorted({county_code_from_fips(node_id) for node_id in split_seeds["test"]}),
+    }
     for split, seeds in split_seeds.items():
         split_dir = ensure_dir(built_root / split)
         chosen_seeds = stable_sample(sorted(seeds), quotas[split])
         for index, seed_id in enumerate(chosen_seeds):
             sample = build_sample_from_seed(
-                raw_data,
+                sanitized_raw,
                 seed_id=seed_id,
                 sample_size=sample_size,
                 knn_k=knn_k,
                 split=split,
                 sample_id=f"{split}_{index:04d}",
                 candidate_node_ids=split_seeds[split],
+                ordering=ordering,
+                lap_pe_dim=lap_pe_dim,
+                rw_steps=rw_steps,
+                neighbor_metric=neighbor_metric,
             )
             path = split_dir / f"{sample.sample_id}.npz"
             save_sample(sample, path)
             manifest[split].append(str(path))
     save_json(built_root / "manifest.json", manifest)
+    save_json(
+        built_root / "dataset_summary.json",
+        {
+            "sanitize_report": sanitize_report,
+            "split_counts": {key: len(value) for key, value in manifest.items()},
+            "split_counties": split_counties,
+            "sample_size": sample_size,
+            "knn_k": knn_k,
+            "ordering": ordering,
+            "lap_pe_dim": lap_pe_dim,
+            "rw_steps": rw_steps,
+            "neighbor_metric": neighbor_metric,
+            "split_mode": split_mode,
+        },
+    )
     return manifest

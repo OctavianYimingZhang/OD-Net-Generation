@@ -42,10 +42,20 @@ def to_device(batch: dict[str, Any], device: str) -> dict[str, Any]:
     return moved
 
 
-def build_dataloader(manifest_path: str | None, split: str, batch_size: int, fixture_name: str | None = None):
+def build_dataloader(dataset_cfg, model_cfg, manifest_path: str | None, split: str, batch_size: int, fixture_name: str | None = None):
     _, DataLoader = _require_torch()
     if fixture_name is not None:
-        sample = build_single_fixture_sample(load_fixture(fixture_name), split=split, knn_k=8)
+        lap_pe_dim = 8 if model_cfg is None else model_cfg.lap_pe_dim
+        rw_steps = 2 if model_cfg is None else model_cfg.rw_steps
+        sample = build_single_fixture_sample(
+            load_fixture(fixture_name),
+            split=split,
+            knn_k=dataset_cfg.knn_k,
+            ordering=dataset_cfg.ordering,
+            lap_pe_dim=lap_pe_dim,
+            rw_steps=rw_steps,
+            neighbor_metric=dataset_cfg.neighbor_metric,
+        )
         return DataLoader([sample_to_tensor_dict(sample)], batch_size=1, shuffle=False, collate_fn=collate_tensor_dict)
     if manifest_path is None:
         raise ValueError("未提供 manifest_path，且未指定 fixture。")
@@ -53,9 +63,21 @@ def build_dataloader(manifest_path: str | None, split: str, batch_size: int, fix
     return DataLoader(dataset, batch_size=batch_size, shuffle=(split == "train"), collate_fn=collate_tensor_dict)
 
 
-def load_numpy_samples_for_gravity(manifest_path: str | None, split: str, fixture_name: str | None = None) -> list[dict[str, np.ndarray]]:
+def load_numpy_samples_for_gravity(dataset_cfg, model_cfg, manifest_path: str | None, split: str, fixture_name: str | None = None) -> list[dict[str, np.ndarray]]:
     if fixture_name is not None:
-        return [build_single_fixture_sample(load_fixture(fixture_name), split=split, knn_k=8).to_numpy_dict()]
+        lap_pe_dim = 8 if model_cfg is None else model_cfg.lap_pe_dim
+        rw_steps = 2 if model_cfg is None else model_cfg.rw_steps
+        return [
+            build_single_fixture_sample(
+                load_fixture(fixture_name),
+                split=split,
+                knn_k=dataset_cfg.knn_k,
+                ordering=dataset_cfg.ordering,
+                lap_pe_dim=lap_pe_dim,
+                rw_steps=rw_steps,
+                neighbor_metric=dataset_cfg.neighbor_metric,
+            ).to_numpy_dict()
+        ]
     if manifest_path is None:
         raise ValueError("Gravity 训练需要 manifest_path 或 fixture。")
     return [load_sample(path).to_numpy_dict() for path in load_manifest_paths(manifest_path, split)]
@@ -104,7 +126,7 @@ def save_history(path: str | Path, history: list[dict[str, float]]) -> None:
     save_json(path, history)
 
 
-def prepare_run(seed: int, artifacts_dir: str | Path) -> str:
+def prepare_run(seed: int, artifacts_dir: str | Path, device_name: str = "auto") -> str:
     set_global_seed(seed)
     ensure_dir(artifacts_dir)
-    return choose_device("auto")
+    return choose_device(device_name)

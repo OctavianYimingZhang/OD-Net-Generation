@@ -126,7 +126,7 @@ class GaussianDiffusion(nn.Module):
 
 
 class ConditionalLatentDiffusion(nn.Module):
-    """兼容旧接口的条件扩散封装。"""
+    """支持 unconditional / conditional 两种模式的条件扩散封装。"""
 
     def __init__(self, latent_channels: int = 16, pair_dim: int = 64, diffusion_steps: int = 100, conditional: bool = True) -> None:
         super().__init__()
@@ -136,7 +136,13 @@ class ConditionalLatentDiffusion(nn.Module):
 
     def training_loss(self, clean_latent: torch.Tensor, pair_condition: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         if pair_condition is None:
-            pair_condition = torch.zeros(clean_latent.shape[0], self.denoiser.cond_channels, clean_latent.shape[-2], clean_latent.shape[-1], device=clean_latent.device)
+            pair_condition = torch.zeros(
+                clean_latent.shape[0],
+                self.denoiser.cond_channels,
+                clean_latent.shape[-2],
+                clean_latent.shape[-1],
+                device=clean_latent.device,
+            )
         if pair_condition.shape[-2:] != clean_latent.shape[-2:]:
             pair_condition = F.interpolate(pair_condition, size=clean_latent.shape[-2:], mode="bilinear", align_corners=False)
         loss = self.diffusion.training_loss(self.denoiser, clean_latent, pair_condition)
@@ -146,9 +152,11 @@ class ConditionalLatentDiffusion(nn.Module):
         return {"loss": loss, "pred_noise": pred_noise}
 
     def sample(self, num_samples: int, device: str | torch.device, pair_condition: torch.Tensor | None = None) -> torch.Tensor:
-        if pair_condition is None:
-            raise ValueError("pair_condition 不能为空。")
         device_obj = torch.device(device)
-        cond = F.interpolate(pair_condition, size=(25, 25), mode="bilinear", align_corners=False)
+        if pair_condition is None:
+            if self.conditional:
+                raise ValueError("conditional diffusion 采样时 pair_condition 不能为空。")
+            cond = torch.zeros(num_samples, self.denoiser.cond_channels, 25, 25, device=device_obj)
+        else:
+            cond = F.interpolate(pair_condition, size=(25, 25), mode="bilinear", align_corners=False).to(device_obj)
         return self.diffusion.sample(self.denoiser, (num_samples, self.denoiser.final.out_channels, 25, 25), cond.to(device_obj), device_obj)
-

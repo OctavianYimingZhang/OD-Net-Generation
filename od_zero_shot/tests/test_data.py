@@ -1,7 +1,9 @@
-"""数据层测试。"""
+"""canonical pipeline 数据与 CLI 测试。"""
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -11,52 +13,59 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from od_zero_shot.data.fixtures import build_synthetic_toy100_raw, load_mini5_fixture
-from od_zero_shot.data.raw import RawMobilityData
-from od_zero_shot.data.samples import build_fixture_samples, build_sample_bundle
-from od_zero_shot.utils.config import ProjectConfig
+from od_zero_shot.data.fixtures import generate_synthetic_toy100, load_five_node_fixture
+from od_zero_shot.data.raw import sanitize_raw_data
+from od_zero_shot.data.sample_builder import build_single_fixture_sample, split_seed_ids_by_county
 
 
-class DataPipelineTest(unittest.TestCase):
-    def test_load_mini5_fixture(self) -> None:
-        centroid, population, od2flow = load_mini5_fixture(PROJECT_ROOT / "data" / "fixtures")
-        self.assertEqual(len(centroid), 5)
-        self.assertEqual(len(population), 5)
-        self.assertIn(("36055011703", "36069050101"), od2flow)
+class CanonicalDataPipelineTest(unittest.TestCase):
+    def test_sanitize_raw_data_keeps_intersection(self) -> None:
+        raw = generate_synthetic_toy100()
+        raw.centroid["36999000000"] = [-73.0, 40.0]
+        sanitized, report = sanitize_raw_data(raw)
+        self.assertNotIn("36999000000", sanitized.node_ids)
+        self.assertGreaterEqual(report["num_dropped_nodes"], 1)
 
-    def test_build_fixture_samples(self) -> None:
-        config = ProjectConfig()
-        fixtures = build_fixture_samples(PROJECT_ROOT, config)
-        mini = fixtures["mini5"]
-        toy = fixtures["synthetic_toy100"]
-        self.assertEqual(mini["y_od"].shape, (5, 5))
-        self.assertEqual(toy["y_od"].shape, (100, 100))
-        total = mini["mask_diag"].sum() + mini["mask_pos_off"].sum() + mini["mask_zero_off"].sum()
-        self.assertEqual(int(total), 25)
+    def test_fixture_sample_contains_metadata(self) -> None:
+        sample = build_single_fixture_sample(
+            load_five_node_fixture(),
+            split="fixture",
+            knn_k=4,
+            ordering="xy",
+            lap_pe_dim=4,
+            rw_steps=2,
+            neighbor_metric="haversine",
+        )
+        self.assertEqual(sample.y_od.shape, (5, 5))
+        self.assertEqual(sample.metadata["ordering"], "xy")
+        self.assertEqual(sample.metadata["lap_pe_dim"], 4)
 
-    def test_county_split_has_no_overlap(self) -> None:
-        config = ProjectConfig()
-        config.dataset.heldout_counties = ["029"]
-        config.dataset.val_counties = []
-        config.dataset.num_train_samples = 4
-        centroid, population, od2flow = build_synthetic_toy100_raw()
-        raw = RawMobilityData(centroid=centroid, population=population, od2flow=od2flow)
-        bundle = build_sample_bundle(PROJECT_ROOT, config, raw_data=raw)
-        for sample in bundle.train:
-            self.assertEqual({node_id[2:5] for node_id in sample["node_ids"]}, {"001"})
-        for sample in bundle.test:
-            self.assertEqual({node_id[2:5] for node_id in sample["node_ids"]}, {"029"})
+    def test_county_split_respects_heldout(self) -> None:
+        split = split_seed_ids_by_county(generate_synthetic_toy100(), heldout_counties=["061"], val_counties=["047"])
+        self.assertTrue(all(node_id[2:5] == "061" for node_id in split["test"]))
+        self.assertTrue(all(node_id[2:5] == "047" for node_id in split["val"]))
+        self.assertTrue(all(node_id[2:5] not in {"061", "047"} for node_id in split["train"]))
 
-    def test_geometry_graph_does_not_depend_on_od_edges(self) -> None:
-        config = ProjectConfig()
-        centroid, population, od2flow = build_synthetic_toy100_raw()
-        raw_a = RawMobilityData(centroid=centroid, population=population, od2flow=od2flow)
-        raw_b = RawMobilityData(centroid=centroid, population=population, od2flow={})
-        bundle_a = build_sample_bundle(PROJECT_ROOT, config, raw_data=raw_a)
-        bundle_b = build_sample_bundle(PROJECT_ROOT, config, raw_data=raw_b)
-        self.assertTrue((bundle_a.fixtures["synthetic_toy100"]["edge_index"] == bundle_b.fixtures["synthetic_toy100"]["edge_index"]).all())
+    def test_cli_check_data_with_fixture(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "od_zero_shot.cli",
+                "check_data",
+                "--config",
+                "od_zero_shot/configs/default.yaml",
+                "--fixture",
+                "synthetic_toy100",
+            ],
+            cwd=PROJECT_ROOT.parent,
+            env={"PYTHONPATH": str(SRC_ROOT), "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("num_intersection_nodes", result.stdout)
 
 
 if __name__ == "__main__":
     unittest.main()
-
