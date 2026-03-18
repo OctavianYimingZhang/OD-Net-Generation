@@ -1,7 +1,0 @@
-{
-  "train": [
-    "od_zero_shot/artifacts/datasets/train/train_synthetic_toy100.npz"
-  ],
-  "val": [],
-  "test": []
-}
