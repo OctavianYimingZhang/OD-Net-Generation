@@ -1,9 +1,0 @@
-seed: 20260317
-num_nodes: 100
-state_code: "36"
-county_codes: ["005", "047", "061", "081", "085", "089", "087", "029"]
-lon_range: [-79.7, -71.8]
-lat_range: [40.5, 45.0]
-distance_decay_km: 22.0
-self_loop_bias: 5.0
-flow_scale: 3.5
