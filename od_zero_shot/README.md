@@ -4,6 +4,8 @@
 
 当前仓库的实验叙事是 `county-held-out / region-held-out transfer`，不是跨城市 zero-shot。输入严格限制为人口分布与地理坐标；不使用卫星影像、路网图或历史 OD 图作为 encoder 输入。
 
+详细交接说明见 `HANDOFF.md`。
+
 ## 环境
 
 - 已实际测试：`Python 3.13`、`torch 2.8`
